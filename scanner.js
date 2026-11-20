@@ -53,6 +53,7 @@ function setDeck(d) {
     return {key: norm(front), e};
   }).filter(v => v.key.length >= 3);
   $("#deckName").textContent = d.name;
+  buildAllVocab();
   renderAll();
 }
 
@@ -68,24 +69,51 @@ function lev(a, b, max) {
   }
   return prev[n];
 }
+let ALLV = [];
+function buildAllVocab() {
+  if (!self.CF_NAMES) return;
+  const have = new Set(VOCAB.map(v => v.key));
+  ALLV = self.CF_NAMES.map(n => ({key: norm(n), e: {n, k: "x"}})).filter(v => v.key.length >= 3 && !have.has(v.key));
+  // trigram index so we only run edit distance on plausible names
+  TRI = new Map();
+  ALLV.forEach((v, i) => { for (const g of grams(v.key)) { let a = TRI.get(g); if (!a) TRI.set(g, a = []); a.push(i); } });
+}
+let TRI = new Map();
+function grams(s) { const t = " " + s + " ", out = new Set(); for (let i = 0; i < t.length - 2; i++) out.add(t.slice(i, i + 3)); return out; }
+function allCandidates(s) {
+  const cnt = new Map(); const gs = grams(s);
+  for (const g of gs) { const a = TRI.get(g); if (!a || a.length > 4000) continue; for (const i of a) cnt.set(i, (cnt.get(i) || 0) + 1); }
+  const need = Math.max(2, Math.floor(gs.size * 0.35));
+  const out = []; for (const [i, c] of cnt) if (c >= need) out.push(ALLV[i]);
+  return out;
+}
 function match(raw) {
+  const r = matchIn(raw, VOCAB, DECK && DECK.plain ? 0.84 : 0.70);
+  if (r && r.v) return r;
+  if (!ALLV.length) return r;
+  const s = norm(raw); if (s.length < 5) return r;
+  const r2 = matchIn(raw, allCandidates(s), 0.76, true);           // a real card that just isn't in this deck/collection list
+  return r2 && r2.v ? r2 : r;
+}
+function matchIn(raw, LIST, strictness, tight) {
   const s = norm(raw); if (s.length < 3) return null;
   let best = null, bs = 0, second = 0;
-  for (const v of VOCAB) {
+  for (const v of LIST) {
+    if (tight && Math.abs(v.key.length - s.length) > 4) continue;
     const k = v.key;
     const max = Math.max(2, Math.ceil(k.length * 0.45));
     // compare full read, and the read trimmed to the name's length (OCR often adds junk at the end)
+    // lev() returns max+1 when it gives up early, so anything over max counts as no match
     const d1 = lev(s, k, max);
-    let sim = 1 - d1 / Math.max(k.length, s.length);
-    if (s.length > k.length) { const d2 = lev(s.slice(0, k.length + 1), k, max); sim = Math.max(sim, 1 - (d2 + 0.5) / k.length); }
-    // OCR dropped junk at the start (e.g. a frame edge read as letters)
-    if (s.length > k.length + 1) { const t = s.slice(s.length - k.length - 1); const d4 = lev(t, k, max); sim = Math.max(sim, 1 - (d4 + 0.7) / k.length); }
+    let sim = d1 > max ? 0 : 1 - d1 / Math.max(k.length, s.length);
+    if (s.length > k.length) { const d2 = lev(s.slice(0, k.length + 1), k, max); if (d2 <= max) sim = Math.max(sim, 1 - (d2 + 0.5) / k.length); }
+    // OCR picked up junk at the start (e.g. a frame edge read as letters)
+    if (s.length > k.length + 1) { for (let off = 1; off <= Math.min(4, s.length - k.length); off++) { const d4 = lev(s.slice(off, off + k.length), k, max); if (d4 <= max) sim = Math.max(sim, 1 - (d4 + 0.4 + 0.1 * off) / k.length); } }
     // partial read: the name got cut off on the right
-    if (s.length >= 6 && s.length < k.length) { const d3 = lev(s, k.slice(0, s.length), Math.ceil(s.length * 0.35)); sim = Math.max(sim, (1 - d3 / s.length) * (0.72 + 0.28 * s.length / k.length)); }
+    if (s.length >= 6 && s.length < k.length) { const mx = Math.ceil(s.length * 0.35); const d3 = lev(s, k.slice(0, s.length), mx); if (d3 <= mx) sim = Math.max(sim, (1 - d3 / s.length) * (0.72 + 0.28 * s.length / k.length)); }
     if (sim > bs) { second = bs; bs = sim; best = v; } else if (sim > second) second = sim;
   }
   if (!best) return null;
-  const strictness = DECK && DECK.plain ? 0.84 : 0.70;
   const ok = (bs >= strictness && bs - second >= 0.05) || bs >= 0.9;
   return ok ? {v: best, sim: bs} : {v: null, sim: bs, near: best};
 }
@@ -111,6 +139,8 @@ async function initOCR() {
   const loadScript = src => new Promise((res, rej) => { const s = document.createElement("script"); s.src = src; s.onload = res; s.onerror = rej; document.head.appendChild(s); });
   let dir = "";
   try { await loadScript("eng-data.js?v=2"); } catch (e) { dir = "ocr/"; try { await loadScript("ocr/eng-data.js?v=2"); } catch (e2) { throw new Error("couldn't load OCR data (eng-data.js not found next to the page or in ocr/)"); } }
+  try { await loadScript(dir + "names.js?v=3"); } catch (e) { try { await loadScript("names.js?v=3"); } catch (e2) {} }
+  buildAllVocab();
   if (typeof Tesseract === "undefined") { try { await loadScript(dir + "tesseract.min.js?v=2"); } catch (e) { throw new Error("couldn't load tesseract.min.js"); } }
   const bin = Uint8Array.from(atob(self.ENG_TRAINEDDATA_B64), c => c.charCodeAt(0));
   self.ENG_TRAINEDDATA_B64 = null;
@@ -271,6 +301,7 @@ function decide(e, manual) {
     else { cls = "in"; v = DECK.cmd.includes(e.n) ? "COMMANDER — SET ASIDE" : "PULL — SET ASIDE"; w = e.why || ""; pulled.push(e.n); beep("in"); }
   } else if (e.k === "a") { cls = "add"; v = "WORTH ADDING"; w = (e.why || "") + (e.swap ? ` · swap for ${e.swap}` : ""); beep("add"); }
   else if (e.k === "o") { cls = "no"; v = "Off-color"; w = "Outside the commander's colors"; beep("no"); }
+  else if (e.k === "x") { cls = "no"; v = "Not in this deck"; w = "Not in the collection list from Commander Forge"; beep("no"); }
   else { cls = "no"; v = "Not needed"; w = "Doesn't beat what's already in the deck"; beep("no"); }
   setVerdict(cls, v, e.n, w);
   log.unshift({n: e.n, k: cls, v, t: Date.now()}); if (log.length > 300) log.pop();
