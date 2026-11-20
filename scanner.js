@@ -103,11 +103,15 @@ async function initOCR() {
   if (worker) return worker;
   const base = new URL(".", location.href).href;
   setStart("Loading the text reader (first time ≈ 8 MB)…");
-  await new Promise((res, rej) => { const s = document.createElement("script"); s.src = "ocr/eng-data.js"; s.onload = res; s.onerror = () => rej(new Error("couldn't load OCR data")); document.head.appendChild(s); });
+  // the engine files may sit next to this page or in an ocr/ folder — try both
+  const loadScript = src => new Promise((res, rej) => { const s = document.createElement("script"); s.src = src; s.onload = res; s.onerror = rej; document.head.appendChild(s); });
+  let dir = "";
+  try { await loadScript("eng-data.js?v=2"); } catch (e) { dir = "ocr/"; try { await loadScript("ocr/eng-data.js?v=2"); } catch (e2) { throw new Error("couldn't load OCR data (eng-data.js not found next to the page or in ocr/)"); } }
+  if (typeof Tesseract === "undefined") { try { await loadScript(dir + "tesseract.min.js?v=2"); } catch (e) { throw new Error("couldn't load tesseract.min.js"); } }
   const bin = Uint8Array.from(atob(self.ENG_TRAINEDDATA_B64), c => c.charCodeAt(0));
   self.ENG_TRAINEDDATA_B64 = null;
   worker = await Tesseract.createWorker([{code: "eng", data: bin}], 1, {
-    workerPath: base + "ocr/worker.min.js", corePath: base + "ocr/", workerBlobURL: false, cacheMethod: "none", gzip: true,
+    workerPath: base + dir + "worker.min.js", corePath: base + dir, workerBlobURL: false, cacheMethod: "none", gzip: true,
   });
   await worker.setParameters({
     tessedit_pageseg_mode: "7",
