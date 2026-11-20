@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>Commander Forge — Live Scanner</title>
+<style>
+:root{--bg:#0d0f14;--panel:#151922;--line:#262d3d;--text:#e6e8ee;--mute:#8d95a8;--gold:#d9ad55;--gold2:#f2cf83;--good:#5fc48a;--bad:#e5636b}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+html,body{margin:0;background:var(--bg);color:var(--text);font:15px/1.4 -apple-system,system-ui,Inter,sans-serif;overscroll-behavior:none}
+button,input,textarea,select{font:inherit;color:var(--text)}
+button{background:#1b2030;border:1px solid var(--line);border-radius:10px;padding:9px 14px}
+button.primary{background:linear-gradient(180deg,#e2b862,#b98a35);color:#1a1307;border:none;font-weight:700}
+textarea{width:100%;min-height:120px;background:#0f121a;border:1px solid var(--line);border-radius:10px;padding:10px;font:12px ui-monospace,Menlo,monospace}
+.wrap{padding:calc(env(safe-area-inset-top) + 8px) 12px calc(env(safe-area-inset-bottom) + 16px)}
+h1{font-size:18px;margin:4px 0 8px;color:var(--gold2);font-family:Georgia,serif}
+.muted{color:var(--mute)}.small{font-size:12.5px}
+.row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}.sp{flex:1}
+#stage{position:relative;width:100%;aspect-ratio:3/4;max-height:68vh;background:#000;border-radius:16px;overflow:hidden;border:4px solid #2a3142;transition:border-color .15s}
+#stage.in{border-color:var(--good)}#stage.add{border-color:var(--gold)}#stage.no{border-color:#4a5268}#stage.unk{border-color:var(--bad)}
+video{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}
+#guide{position:absolute;border:2px solid rgba(255,255,255,.8);border-radius:12px;box-shadow:0 0 0 2000px rgba(0,0,0,.35);pointer-events:none}
+#band{position:absolute;left:0;right:0;border:2px dashed var(--gold2);border-radius:6px;background:rgba(242,207,131,.08)}
+#hint{position:absolute;top:8px;left:0;right:0;text-align:center;font-size:12.5px;color:#fff;text-shadow:0 1px 3px #000}
+#verdict{position:absolute;left:8px;right:8px;bottom:8px;border-radius:12px;padding:12px 14px;background:rgba(13,15,20,.88);backdrop-filter:blur(6px);border:1px solid var(--line);min-height:68px}
+#verdict .v{font-weight:800;font-size:22px;letter-spacing:.02em}
+#verdict .n{font-size:16px;margin-top:2px}
+#verdict .w{font-size:12.5px;color:var(--mute);margin-top:3px}
+#verdict.in{background:rgba(16,60,34,.93);border-color:var(--good)}#verdict.in .v{color:#7ff0ae}
+#verdict.add{background:rgba(70,52,14,.93);border-color:var(--gold)}#verdict.add .v{color:var(--gold2)}
+#verdict.unk .v{color:#ff9aa1}
+#readout{position:absolute;top:30px;right:8px;font:11px ui-monospace,Menlo,monospace;color:#cfd5e2;background:rgba(0,0,0,.5);padding:3px 6px;border-radius:6px;max-width:60%;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#start{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;background:rgba(13,15,20,.92);text-align:center;padding:20px}
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:12px;margin-top:10px}
+.bar{height:8px;border-radius:5px;background:#0f121a;border:1px solid var(--line);overflow:hidden}.bar i{display:block;height:100%;background:var(--good);width:0}
+.item{display:flex;gap:8px;align-items:center;padding:5px 0;border-bottom:1px solid #1e2433;font-size:14px}
+.item.done{opacity:.4;text-decoration:line-through}
+.tag{font-size:11px;font-weight:700;padding:2px 7px;border-radius:6px;white-space:nowrap}
+.tag.in{background:var(--good);color:#06210f}.tag.add{background:var(--gold);color:#1a1307}.tag.no{background:#2a3142;color:var(--mute)}.tag.unk{background:var(--bad);color:#fff}
+.tabs{display:flex;gap:6px;margin-top:10px}.tabs button{flex:1;padding:7px}.tabs button.on{border-color:var(--gold);color:var(--gold2)}
+#err{color:#ff9aa1}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="row"><h1>Live Scanner</h1><span class="sp"></span><span class="small muted" id="deckName">No deck loaded</span></div>
+  <div id="stage">
+    <video id="vid" playsinline muted autoplay></video>
+    <div id="guide"><div id="band"></div></div>
+    <div id="hint">Fit the card in the frame · name in the gold strip</div>
+    <div id="readout"></div>
+    <div id="verdict"><div class="v">Ready</div><div class="w">Hold a card steady in the frame.</div></div>
+    <div id="start">
+      <div style="font-size:40px">📷</div>
+      <div id="startMsg">Load a deck from Commander Forge below, then start the camera.</div>
+      <button class="primary" id="btnStart">Start camera</button>
+      <div id="err" class="small"></div>
+    </div>
+  </div>
+  <div class="row" style="margin-top:8px">
+    <button id="btnPause">Pause</button>
+    <button id="btnTorch" style="display:none">🔦 Light</button>
+    <span class="sp"></span>
+    <span class="small muted" id="fps"></span>
+  </div>
+  <div class="panel">
+    <div class="row"><b id="progTxt">0 / 0 pulled</b><span class="sp"></span><button id="btnUndo" class="small">Undo last</button></div>
+    <div class="bar" style="margin-top:6px"><i id="prog"></i></div>
+    <div class="tabs"><button data-t="log" class="on">Scanned</button><button data-t="left">Still to pull</button><button data-t="adds">Adds</button><button data-t="load">Deck</button></div>
+    <div id="t-log"></div>
+    <div id="t-left" style="display:none"></div>
+    <div id="t-adds" style="display:none"></div>
+    <div id="t-load" style="display:none">
+      <p class="small muted">In Commander Forge → 📷 Scan → <b>Live scanner</b>, tap <b>Copy scanner code</b>, then paste it here. You can also paste a plain decklist; it then knows only which cards to pull, not which ones are worth adding.</p>
+      <textarea id="code" placeholder="CF1:…"></textarea>
+      <div class="row" style="margin-top:8px"><button class="primary" id="btnLoad">Load deck</button><span class="sp"></span><button id="btnCopyPulled">Copy pulled list</button></div>
+      <p class="small muted">“Copy pulled list” lets you paste your progress back into Commander Forge.</p>
+    </div>
+  </div>
+</div>
+<script src="ocr/tesseract.min.js"></script>
+<script src="scanner.js"></script>
+</body>
+</html>
