@@ -75,14 +75,18 @@ function match(raw) {
     const k = v.key;
     const max = Math.max(2, Math.ceil(k.length * 0.45));
     // compare full read, and the read trimmed to the name's length (OCR often adds junk at the end)
-    const d1 = lev(s, k, max), d2 = s.length > k.length ? lev(s.slice(0, k.length + 1), k, max) : d1;
-    const d = Math.min(d1, d2 + 0.5);
-    const sim = 1 - d / Math.max(k.length, Math.min(s.length, k.length + 1));
+    const d1 = lev(s, k, max);
+    let sim = 1 - d1 / Math.max(k.length, s.length);
+    if (s.length > k.length) { const d2 = lev(s.slice(0, k.length + 1), k, max); sim = Math.max(sim, 1 - (d2 + 0.5) / k.length); }
+    // OCR dropped junk at the start (e.g. a frame edge read as letters)
+    if (s.length > k.length + 1) { const t = s.slice(s.length - k.length - 1); const d4 = lev(t, k, max); sim = Math.max(sim, 1 - (d4 + 0.7) / k.length); }
+    // partial read: the name got cut off on the right
+    if (s.length >= 6 && s.length < k.length) { const d3 = lev(s, k.slice(0, s.length), Math.ceil(s.length * 0.35)); sim = Math.max(sim, (1 - d3 / s.length) * (0.72 + 0.28 * s.length / k.length)); }
     if (sim > bs) { second = bs; bs = sim; best = v; } else if (sim > second) second = sim;
   }
   if (!best) return null;
-  const strictness = DECK && DECK.plain ? 0.86 : 0.74;
-  const ok = (bs >= strictness && bs - second >= 0.06) || bs >= 0.92;
+  const strictness = DECK && DECK.plain ? 0.84 : 0.70;
+  const ok = (bs >= strictness && bs - second >= 0.05) || bs >= 0.9;
   return ok ? {v: best, sim: bs} : {v: null, sim: bs, near: best};
 }
 
@@ -94,10 +98,10 @@ function setVerdict(cls, v, n, w) {
 function layoutGuide() {
   const st = $("#stage").getBoundingClientRect();
   const W = st.width, H = st.height;
-  let gw = W * 0.78, gh = gw * 88 / 63;
+  let gw = W * 0.86, gh = gw * 88 / 63;
   if (gh > H * 0.9) { gh = H * 0.9; gw = gh * 63 / 88; }
   const g = $("#guide"); g.style.width = gw + "px"; g.style.height = gh + "px"; g.style.left = (W - gw) / 2 + "px"; g.style.top = (H - gh) / 2 + "px";
-  const b = $("#band"); b.style.top = gh * 0.025 + "px"; b.style.height = gh * 0.095 + "px"; b.style.left = gw * 0.03 + "px"; b.style.right = gw * 0.2 + "px";
+  const b = $("#band"); b.style.top = gh * 0.03 + "px"; b.style.height = gh * 0.085 + "px"; b.style.left = gw * 0.03 + "px"; b.style.right = gw * 0.2 + "px";
 }
 async function initOCR() {
   if (worker) return worker;
@@ -148,31 +152,67 @@ async function startCamera() {
   running = true; loop();
 }
 const cvs = document.createElement("canvas"), ctx = cvs.getContext("2d", {willReadFrequently: true});
-function grabBand() {
-  const v = $("#vid"); const vw = v.videoWidth, vh = v.videoHeight; if (!vw) return null;
-  const st = $("#stage").getBoundingClientRect(), g = $("#guide").getBoundingClientRect(), b = $("#band").getBoundingClientRect();
+const reg = document.createElement("canvas"), rctx = reg.getContext("2d", {willReadFrequently: true});
+let preview = null, pctx = null, frameNo = 0;
+function ensurePreview() {
+  if (preview) return;
+  const wrap = document.createElement("div"); wrap.className = "panel"; wrap.style.marginTop = "8px"; wrap.style.padding = "8px";
+  wrap.innerHTML = `<div class="small muted" style="margin-bottom:4px">What the reader sees <span id="readTxt" style="color:#f2cf83"></span></div>`;
+  preview = document.createElement("canvas"); preview.style.width = "100%"; preview.style.height = "44px"; preview.style.background = "#fff"; preview.style.borderRadius = "6px";
+  wrap.appendChild(preview); $("#stage").insertAdjacentElement("afterend", wrap); pctx = preview.getContext("2d");
+}
+// Map an element-space rectangle (relative to the stage) to video pixels.
+function toVideo(rect) {
+  const v = $("#vid"); const vw = v.videoWidth, vh = v.videoHeight;
+  const st = $("#stage").getBoundingClientRect();
   const scale = Math.max(st.width / vw, st.height / vh);
   const ox = (st.width - vw * scale) / 2, oy = (st.height - vh * scale) / 2;
-  const sx = (b.left - st.left - ox) / scale, sy = (b.top - st.top - oy) / scale, sw = b.width / scale, sh = b.height / scale;
-  const outH = 64, outW = Math.round(sw / sh * outH);
+  return {x: (rect.left - st.left - ox) / scale, y: (rect.top - st.top - oy) / scale, w: rect.width / scale, h: rect.height / scale};
+}
+function grabBand() {
+  const v = $("#vid"); if (!v.videoWidth) return null;
+  frameNo++;
+  const g = $("#guide").getBoundingClientRect();
+  const G = toVideo(g);
+  // Search region: top 24% of the card, skipping the right side where the mana cost sits.
+  const sx = G.x + G.w * 0.03, sw = G.w * 0.80, sy = G.y - G.h * 0.02, sh = G.h * 0.26;
+  const RW = 480, RH = Math.round(RW * sh / sw);
+  reg.width = RW; reg.height = RH;
+  rctx.drawImage(v, sx, sy, sw, sh, 0, 0, RW, RH);
+  const rd = rctx.getImageData(0, 0, RW, RH).data;
+  const gray = new Float32Array(RW * RH);
+  for (let i = 0, j = 0; j < gray.length; i += 4, j++) gray[j] = rd[i] * 0.299 + rd[i + 1] * 0.587 + rd[i + 2] * 0.114;
+  // Row energy = horizontal gradient; text lines light up.
+  const energy = new Float32Array(RH);
+  for (let y = 0; y < RH; y++) { let e = 0; const o = y * RW; for (let x = 1; x < RW; x++) e += Math.abs(gray[o + x] - gray[o + x - 1]); energy[y] = e / RW; }
+  const lineH = Math.max(8, Math.round(RH * (0.062 / 0.26)));       // name line ≈ 6.2% of card height
+  let best = 0, bestY = Math.round(RH * 0.2), run = 0;
+  for (let y = 0; y < RH; y++) { run += energy[y]; if (y >= lineH) run -= energy[y - lineH]; if (y >= lineH - 1 && run > best) { best = run; bestY = y - lineH + 1; } }
+  // Alternate between the detected line and the fixed gold strip, so either alignment works.
+  let by, bh;
+  if (frameNo % 2) { by = bestY - lineH * 0.25; bh = lineH * 1.5; }
+  else { by = RH * (0.045 / 0.26); bh = RH * (0.095 / 0.26); }
+  by = Math.max(0, by); bh = Math.min(RH - by, bh);
+  // Re-crop the chosen line from the full-resolution video for sharpness.
+  const vy = sy + by / RH * sh, vhh = bh / RH * sh;
+  const outH = 96, outW = Math.min(1400, Math.round(sw / vhh * outH));
   cvs.width = outW; cvs.height = outH;
-  ctx.drawImage(v, sx, sy, sw, sh, 0, 0, outW, outH);
+  ctx.drawImage(v, sx, vy, sw, vhh, 0, 0, outW, outH);
   const img = ctx.getImageData(0, 0, outW, outH), d = img.data;
-  // grayscale + histogram
-  const hist = new Uint32Array(256); let sum = 0;
-  const gray = new Uint8Array(outW * outH);
-  for (let i = 0, j = 0; i < d.length; i += 4, j++) { const y = (d[i] * 0.299 + d[i + 1] * 0.587 + d[i + 2] * 0.114) | 0; gray[j] = y; hist[y]++; sum += y; }
-  // Otsu threshold
-  const total = gray.length; let sumB = 0, wB = 0, max = 0, thr = 127, sumAll = 0;
-  for (let t = 0; t < 256; t++) sumAll += t * hist[t];
-  for (let t = 0; t < 256; t++) { wB += hist[t]; if (!wB) continue; const wF = total - wB; if (!wF) break; sumB += t * hist[t]; const mB = sumB / wB, mF = (sumAll - sumB) / wF; const between = wB * wF * (mB - mF) * (mB - mF); if (between > max) { max = between; thr = t; } }
-  // decide polarity: text is the minority class
-  let below = 0; for (let j = 0; j < total; j++) if (gray[j] <= thr) below++;
-  const darkText = below < total / 2;
-  const contrast = Math.sqrt(max / (total * total)) ; // rough separability
-  for (let j = 0, i = 0; j < total; j++, i += 4) { const on = darkText ? gray[j] <= thr : gray[j] > thr; const val = on ? 0 : 255; d[i] = d[i + 1] = d[i + 2] = val; d[i + 3] = 255; }
+  const n = outW * outH, gr = new Float32Array(n), hist = new Uint32Array(256);
+  for (let i = 0, k = 0; k < n; i += 4, k++) { const y = d[i] * 0.299 + d[i + 1] * 0.587 + d[i + 2] * 0.114; gr[k] = y; hist[y | 0]++; }
+  // Contrast stretch between the 3rd and 97th percentile.
+  let acc = 0, lo = 0, hi = 255; for (let t = 0; t < 256; t++) { acc += hist[t]; if (acc >= n * 0.03) { lo = t; break; } }
+  acc = 0; for (let t = 255; t >= 0; t--) { acc += hist[t]; if (acc >= n * 0.03) { hi = t; break; } }
+  const span = Math.max(1, hi - lo);
+  let mean = 0; for (let k = 0; k < n; k++) mean += gr[k]; mean /= n;
+  const median = (() => { let a = 0; for (let t = 0; t < 256; t++) { a += hist[t]; if (a >= n / 2) return t; } return 128; })();
+  const invert = median < 110;                                      // light text on a dark title bar
+  for (let i = 0, k = 0; k < n; i += 4, k++) { let y = (gr[k] - lo) / span * 255; y = y < 0 ? 0 : y > 255 ? 255 : y; if (invert) y = 255 - y; d[i] = d[i + 1] = d[i + 2] = y; d[i + 3] = 255; }
   ctx.putImageData(img, 0, 0);
-  return {canvas: cvs, contrast};
+  ensurePreview();
+  preview.width = outW; preview.height = outH; pctx.drawImage(cvs, 0, 0);
+  return {canvas: cvs, contrast: span / 4};
 }
 let frames = 0, lastFps = performance.now();
 async function loop() {
@@ -181,17 +221,18 @@ async function loop() {
   busy = true;
   try {
     const g = grabBand();
-    if (g && g.contrast > 6) {
+    if (g && g.contrast > 8) {
       const r = await worker.recognize(g.canvas);
-      const text = (r.data.text || "").replace(/\n/g, " ").trim();
+      const text = (r.data.text || "").replace(/\n/g, " ").replace(/\s+/g, " ").trim();
       $("#readout").textContent = text ? `“${text}”` : "";
+      const rt = document.getElementById("readTxt"); if (rt) rt.textContent = text ? `“${text}”` : "";
       handleRead(text);
     } else { $("#readout").textContent = ""; handleRead(""); }
     frames++;
     const now = performance.now(); if (now - lastFps > 2000) { $("#fps").textContent = `${(frames * 1000 / (now - lastFps)).toFixed(1)} reads/s`; frames = 0; lastFps = now; }
   } catch (e) { console.warn(e); }
   busy = false;
-  setTimeout(() => requestAnimationFrame(loop), 40);
+  setTimeout(() => requestAnimationFrame(loop), 30);
 }
 
 // ------------------------------------------------------------ verdicts
@@ -217,7 +258,7 @@ function handleRead(text) {
   const name = m.v.e.n;
   recent.push(name); if (recent.length > 3) recent.shift();
   const votes = recent.filter(x => x === name).length;
-  if (votes < 2 && m.sim < 0.9) return;                    // need two agreeing reads unless very confident
+  if (votes < 2 && m.sim < 0.84) return;                    // need two agreeing reads unless very confident
   if (lastShown === name && performance.now() - lastShownAt < 4000) return; // same card still in frame
   lastShown = name; lastShownAt = performance.now();
   decide(m.v.e);
